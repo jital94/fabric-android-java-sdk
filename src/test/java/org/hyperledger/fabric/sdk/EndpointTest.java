@@ -23,9 +23,7 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Properties;
 import java.util.Set;
-
-import io.netty.handler.ssl.SslContextBuilder;
-import io.netty.handler.ssl.SslProvider;
+import javax.net.ssl.SSLContext;
 import org.junit.Assert;
 import org.junit.Rule;
 import org.junit.Test;
@@ -311,15 +309,19 @@ public class EndpointTest {
 
         class TEndpoint extends Endpoint {
 
-            private SslContextBuilder sslContextBuilder;
+            private SSLContext sslContextBuilder;
 
             TEndpoint(String url, Properties properties) {
                 super(url, properties);
             }
 
             @Override
-            protected SslContextBuilder getSslContextBuilder(X509Certificate[] clientCert, PrivateKey clientKey, SslProvider sslprovider) {
-                sslContextBuilder = super.getSslContextBuilder(clientCert, clientKey, sslprovider);
+            protected SSLContext getSslContextBuilder(X509Certificate[] clientCert, PrivateKey clientKey, byte[] pemBytes) {
+                try {
+                    sslContextBuilder = super.getSslContextBuilder(clientCert, clientKey, pemBytes);
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
                 return sslContextBuilder;
             }
 

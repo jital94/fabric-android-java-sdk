@@ -23,8 +23,12 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.security.KeyManagementException;
 import java.security.KeyStore;
+import java.security.KeyStoreException;
+import java.security.NoSuchAlgorithmException;
 import java.security.PrivateKey;
+import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.AbstractMap;
@@ -37,10 +41,7 @@ import java.util.Properties;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLException;
-import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
@@ -48,9 +49,6 @@ import javax.net.ssl.X509TrustManager;
 import com.google.common.collect.ImmutableMap;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.okhttp.OkHttpChannelBuilder;
-import io.netty.handler.ssl.SslContext;
-import io.netty.handler.ssl.SslContextBuilder;
-import io.netty.handler.ssl.SslProvider;
 import org.apache.commons.codec.binary.Hex;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -257,30 +255,10 @@ class Endpoint {
                         logger.trace(format("Endpoint %s Negotiation type: '%s', SSLprovider: '%s'", url, nt, sslp));
                         logger.trace(format("Endpoint %s  final server pemBytes: %s", url, Hex.encodeHexString(pemBytes)));
 
-                        KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType());
-                        ks.load(null);
-
-                        CertificateFactory certFactory = CertificateFactory.getInstance("X.509");
-                        InputStream in = new ByteArrayInputStream(pemBytes);
-                        X509Certificate cert = (X509Certificate) certFactory.generateCertificate(in);
-                        ks.setCertificateEntry("ca-cert", cert);
-                        ks.setKeyEntry("client-key", clientKey, "".toCharArray(), clientCert);
-
-                        TrustManagerFactory trustManagerFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-                        trustManagerFactory.init(ks);
-                        TrustManager[] trustManagers = trustManagerFactory.getTrustManagers();
-
-                        if (trustManagers.length != 1 || !(trustManagers[0] instanceof X509TrustManager)) {
-                            throw new IllegalStateException("Unexpected default trust managers:" + Arrays.toString(trustManagers));
-                        }
-
-                        SSLContext sslContext = SSLContext.getInstance("TLS");
-                        sslContext.init(null, trustManagerFactory.getTrustManagers(), null);
-
-                        SSLSocketFactory sslSocketFactory = sslContext.getSocketFactory();
+                        SSLContext sslContext = getSslContextBuilder(clientCert, clientKey, pemBytes);
                         channelBuilder = OkHttpChannelBuilder
                                 .forAddress(addr, port)
-                                .sslSocketFactory(sslSocketFactory);
+                                .sslSocketFactory(sslContext.getSocketFactory());
 
                         if (nt.equals("TLS")) {
                             channelBuilder.useTransportSecurity();
@@ -311,15 +289,27 @@ class Endpoint {
         }
     }
 
-    SslContextBuilder getSslContextBuilder(X509Certificate[] clientCert, PrivateKey clientKey, SslProvider sslprovider) {
-//        SslContextBuilder clientContextBuilder = GrpcSslContexts.configure(SslContextBuilder.forClient(), sslprovider);
-//        if (clientKey != null && clientCert != null) {
-//            clientContextBuilder = clientContextBuilder.keyManager(clientKey, clientCert);
-//        } else {
-//            logger.debug(format("Endpoint %s with no ssl context", url));
-//        }
-//        return clientContextBuilder;
-        return null;
+    SSLContext getSslContextBuilder(X509Certificate[] clientCert, PrivateKey clientKey, byte[] pemBytes) throws CertificateException, NoSuchAlgorithmException, IOException, KeyStoreException, KeyManagementException {
+        KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType());
+        ks.load(null);
+
+        CertificateFactory certFactory = CertificateFactory.getInstance("X.509");
+        InputStream in = new ByteArrayInputStream(pemBytes);
+        X509Certificate cert = (X509Certificate) certFactory.generateCertificate(in);
+        ks.setCertificateEntry("ca-cert", cert);
+        ks.setKeyEntry("client-key", clientKey, "".toCharArray(), clientCert);
+
+        TrustManagerFactory trustManagerFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+        trustManagerFactory.init(ks);
+        TrustManager[] trustManagers = trustManagerFactory.getTrustManagers();
+
+        if (trustManagers.length != 1 || !(trustManagers[0] instanceof X509TrustManager)) {
+            throw new IllegalStateException("Unexpected default trust managers:" + Arrays.toString(trustManagers));
+        }
+
+        SSLContext sslContext = SSLContext.getInstance("TLS");
+        sslContext.init(null, trustManagerFactory.getTrustManagers(), null);
+        return sslContext;
     }
 
     byte[] getClientTLSCertificateDigest() {
@@ -341,7 +331,7 @@ class Endpoint {
         return clientTLSCertificateDigest;
     }
 
-    private static final Pattern METHOD_PATTERN = Pattern.compile("grpc\\.OkHttpChannelBuilderOption\\.([^.]*)$");
+    private static final Pattern METHOD_PATTERN = Pattern.compile("grpc\\.NettyChannelBuilderOption\\.([^.]*)$");
     private static final Map<Class<?>, Class<?>> WRAPPERS_TO_PRIM = new ImmutableMap.Builder<Class<?>, Class<?>>()
             .put(Boolean.class, boolean.class).put(Byte.class, byte.class).put(Character.class, char.class)
             .put(Double.class, double.class).put(Float.class, float.class).put(Integer.class, int.class)
