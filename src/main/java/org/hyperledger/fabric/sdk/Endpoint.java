@@ -297,7 +297,9 @@ class Endpoint {
         InputStream in = new ByteArrayInputStream(pemBytes);
         X509Certificate cert = (X509Certificate) certFactory.generateCertificate(in);
         ks.setCertificateEntry("ca-cert", cert);
-        ks.setKeyEntry("client-key", clientKey, "".toCharArray(), clientCert);
+        if (clientCert != null) {
+            ks.setKeyEntry("client-key", clientKey, "".toCharArray(), clientCert);
+        }
 
         TrustManagerFactory trustManagerFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
         trustManagerFactory.init(ks);
