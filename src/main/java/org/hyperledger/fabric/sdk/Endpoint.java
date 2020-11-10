@@ -23,9 +23,16 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.security.KeyManagementException;
+import java.security.KeyStore;
+import java.security.KeyStoreException;
+import java.security.NoSuchAlgorithmException;
 import java.security.PrivateKey;
+import java.security.cert.CertificateException;
+import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.AbstractMap;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
@@ -34,16 +41,14 @@ import java.util.Properties;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import javax.net.ssl.SSLException;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.TrustManagerFactory;
+import javax.net.ssl.X509TrustManager;
 
 import com.google.common.collect.ImmutableMap;
 import io.grpc.ManagedChannelBuilder;
-import io.grpc.netty.GrpcSslContexts;
-import io.grpc.netty.NegotiationType;
-import io.grpc.netty.NettyChannelBuilder;
-import io.netty.handler.ssl.SslContext;
-import io.netty.handler.ssl.SslContextBuilder;
-import io.netty.handler.ssl.SslProvider;
+import io.grpc.okhttp.OkHttpChannelBuilder;
 import org.apache.commons.codec.binary.Hex;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -73,7 +78,7 @@ class Endpoint {
     private final String url;
     private byte[] clientTLSCertificateDigest;
     private byte[] tlsClientCertificatePEMBytes;
-    private NettyChannelBuilder channelBuilder = null;
+    private OkHttpChannelBuilder channelBuilder = null;
 
     private static final Map<String, String> CN_CACHE = Collections.synchronizedMap(new HashMap<>());
 
@@ -237,42 +242,36 @@ class Endpoint {
 
         try {
             if (protocol.equalsIgnoreCase("grpc")) {
-                this.channelBuilder = NettyChannelBuilder.forAddress(addr, port).usePlaintext(true);
+                this.channelBuilder = OkHttpChannelBuilder.forAddress(addr, port).usePlaintext();
                 addNettyBuilderProps(channelBuilder, properties);
             } else if (protocol.equalsIgnoreCase("grpcs")) {
                 if (pemBytes == null) {
                     // use root certificate
-                    this.channelBuilder = NettyChannelBuilder.forAddress(addr, port);
+                    this.channelBuilder = OkHttpChannelBuilder.forAddress(addr, port);
                     addNettyBuilderProps(channelBuilder, properties);
                 } else {
                     try {
 
                         logger.trace(format("Endpoint %s Negotiation type: '%s', SSLprovider: '%s'", url, nt, sslp));
-                        SslProvider sslprovider = sslp.equals("openSSL") ? SslProvider.OPENSSL : SslProvider.JDK;
-                        NegotiationType ntype = nt.equals("TLS") ? NegotiationType.TLS : NegotiationType.PLAINTEXT;
-
-                        SslContextBuilder clientContextBuilder = getSslContextBuilder(clientCert, clientKey, sslprovider);
-                        SslContext sslContext;
-
                         logger.trace(format("Endpoint %s  final server pemBytes: %s", url, Hex.encodeHexString(pemBytes)));
 
-                        try (InputStream myInputStream = new ByteArrayInputStream(pemBytes)) {
-                            sslContext = clientContextBuilder
-                                    .trustManager(myInputStream)
-                                    .build();
-                        }
-
-                        channelBuilder = NettyChannelBuilder
+                        SSLContext sslContext = getSslContextBuilder(clientCert, clientKey, pemBytes);
+                        channelBuilder = OkHttpChannelBuilder
                                 .forAddress(addr, port)
-                                .sslContext(sslContext)
-                                .negotiationType(ntype);
+                                .sslSocketFactory(sslContext.getSocketFactory());
+
+                        if (nt.equals("TLS")) {
+                            channelBuilder.useTransportSecurity();
+                        } else {
+                            channelBuilder.usePlaintext();
+                        }
 
                         if (cn != null) {
                             logger.debug(format("Endpoint %s, using CN overrideAuthority: '%s'", url, cn));
                             channelBuilder.overrideAuthority(cn);
                         }
                         addNettyBuilderProps(channelBuilder, properties);
-                    } catch (SSLException sslex) {
+                    } catch (RuntimeException sslex) {
 
                         throw new RuntimeException(sslex);
                     }
@@ -290,14 +289,29 @@ class Endpoint {
         }
     }
 
-    SslContextBuilder getSslContextBuilder(X509Certificate[] clientCert, PrivateKey clientKey, SslProvider sslprovider) {
-        SslContextBuilder clientContextBuilder = GrpcSslContexts.configure(SslContextBuilder.forClient(), sslprovider);
-        if (clientKey != null && clientCert != null) {
-            clientContextBuilder = clientContextBuilder.keyManager(clientKey, clientCert);
-        } else {
-            logger.debug(format("Endpoint %s with no ssl context", url));
+    SSLContext getSslContextBuilder(X509Certificate[] clientCert, PrivateKey clientKey, byte[] pemBytes) throws CertificateException, NoSuchAlgorithmException, IOException, KeyStoreException, KeyManagementException {
+        KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType());
+        ks.load(null);
+
+        CertificateFactory certFactory = CertificateFactory.getInstance("X.509");
+        InputStream in = new ByteArrayInputStream(pemBytes);
+        X509Certificate cert = (X509Certificate) certFactory.generateCertificate(in);
+        ks.setCertificateEntry("ca-cert", cert);
+        if (clientCert != null) {
+            ks.setKeyEntry("client-key", clientKey, "".toCharArray(), clientCert);
         }
-        return clientContextBuilder;
+
+        TrustManagerFactory trustManagerFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+        trustManagerFactory.init(ks);
+        TrustManager[] trustManagers = trustManagerFactory.getTrustManagers();
+
+        if (trustManagers.length != 1 || !(trustManagers[0] instanceof X509TrustManager)) {
+            throw new IllegalStateException("Unexpected default trust managers:" + Arrays.toString(trustManagers));
+        }
+
+        SSLContext sslContext = SSLContext.getInstance("TLS");
+        sslContext.init(null, trustManagerFactory.getTrustManagers(), null);
+        return sslContext;
     }
 
     byte[] getClientTLSCertificateDigest() {
@@ -325,7 +339,7 @@ class Endpoint {
             .put(Double.class, double.class).put(Float.class, float.class).put(Integer.class, int.class)
             .put(Long.class, long.class).put(Short.class, short.class).put(Void.class, void.class).build();
 
-    private void addNettyBuilderProps(NettyChannelBuilder channelBuilder, Properties props)
+    private void addNettyBuilderProps(OkHttpChannelBuilder channelBuilder, Properties props)
             throws NoSuchMethodException, InvocationTargetException, IllegalAccessException {
 
         if (props == null) {
@@ -487,5 +501,4 @@ class Endpoint {
         return new Endpoint(url, properties);
 
     }
-
 }
